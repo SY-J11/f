@@ -10,3 +10,8 @@
 /* 그래프는 기본 PC 2열, 모바일 1열을 공통 적용합니다.
    개별 그룹의 2열 강제 규칙을 두지 않아 기준금리 그래프와 같은 반응형 레이아웃을 사용합니다. */
 @media(max-width:760px){.chart-grid{grid-template-columns:minmax(0,1fr);gap:10px}}
+
+/* 새로고침 버튼: '시장 수급 분석' 화면의 버튼과 동일한 모양 */
+.tools button#refresh{box-shadow:none;font:inherit;cursor:pointer;width:34px;height:34px;padding:0;border:1px solid #e5eaf1;background:#f8f9fb;border-radius:10px;color:#657287;font-size:17px;line-height:1;display:inline-flex;align-items:center;justify-content:center}
+.tools button#refresh:active{background:#eaf0f7}
+.tools button#refresh:disabled{opacity:.55}
