@@ -196,29 +196,40 @@ function makeCharts() {
   });
 }
 
+let fredBatchPromise = null;
+const fredSeries = [...new Set(all.filter(item=>item.source==='fred').map(item=>item.ticker))];
+
+async function loadFredBatch(){
+  if(fredBatchPromise) return fredBatchPromise;
+  fredBatchPromise=(async()=>{
+    const endpoint=`${PROXY_BASE}/fred.csv?series=${encodeURIComponent(fredSeries.join(','))}&start=2015-01-01`;
+    const response=await fetch(endpoint,{cache:'no-store',headers:{'Accept':'text/csv,text/plain,*/*'}});
+    const csv=(await response.text()).replace(/^\uFEFF/,'').trim();
+    if(!response.ok) throw new Error(`FRED 데이터 연결 HTTP ${response.status}: ${csv.slice(0,260).replace(/\s+/g,' ')}`);
+    const lines=csv.split(/\r?\n/);
+    const headers=(lines.shift()||'').split(',').map(x=>x.trim());
+    if(headers[0]!=='observation_date'||!fredSeries.every(id=>headers.includes(id))) throw new Error(`FRED CSV 형식 또는 시리즈 누락: ${headers.join(',').slice(0,220)}`);
+    const indexes=Object.fromEntries(fredSeries.map(id=>[id,headers.indexOf(id)]));
+    const result=new Map(fredSeries.map(id=>[id,[]]));
+    for(const line of lines){
+      const parts=line.split(','); const date=(parts[0]||'').trim();
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+      const time=Math.floor(Date.parse(`${date}T00:00:00Z`)/1000);
+      for(const id of fredSeries){
+        const raw=(parts[indexes[id]]||'').trim(); const value=raw==='.'||raw===''?NaN:Number(raw);
+        if(Number.isFinite(value)) result.get(id).push({time,value,date});
+      }
+    }
+    return result;
+  })().catch(error=>{fredBatchPromise=null;throw error;});
+  return fredBatchPromise;
+}
+
 async function fetchFred(item) {
-  // FRED 전용 Worker 경로를 사용합니다. 전체 URL 허용목록 검사로 인한 403을 피합니다.
-  const endpoint=`${PROXY_BASE}/fred.csv?series=${encodeURIComponent(item.ticker)}&start=2015-01-01`;
-  const response=await fetch(endpoint,{cache:'no-store',headers:{'Accept':'text/csv,text/plain,*/*'}});
-  if(!response.ok){
-    let detail='';
-    try{detail=(await response.text()).slice(0,220);}catch{}
-    throw new Error(`FRED 데이터 연결 HTTP ${response.status}${detail?`: ${detail}`:''}`);
-  }
-  const csv=(await response.text()).replace(/^\uFEFF/,'').trim();
-  if(!/^observation_date,/i.test(csv)) {
-    let detail=csv.slice(0,260).replace(/\s+/g,' ');
-    try { const payload=JSON.parse(csv); detail=payload.error || payload.message || payload.detail || JSON.stringify(payload).slice(0,220); } catch {}
-    throw new Error(`FRED CSV 형식이 아닙니다: ${detail || '빈 응답'} · Worker의 /fred.csv 경로 및 배포 버전을 확인하세요`);
-  }
-  const values=csv.split(/\r?\n/).slice(1).map(line=>{
-    const parts=line.split(','); const date=(parts[0]||'').trim(); const raw=(parts[1]||'').trim();
-    const value=raw==='.'||raw===''?NaN:Number(raw);
-    if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||!Number.isFinite(value)) return null;
-    const normalized=value; // ICSA·CCSA는 이미 건 단위 원자료이므로 추가로 1,000으로 나누지 않습니다.
-    return {time:Math.floor(Date.parse(`${date}T00:00:00Z`)/1000),value:item.transform?item.transform(normalized):normalized,date};
-  }).filter(Boolean);
-  if(values.length<2) throw new Error('FRED 관측값 부족');
+  const batch=await loadFredBatch();
+  const raw=batch.get(item.ticker)||[];
+  if(raw.length<2) throw new Error(`${item.name}: FRED 관측값 부족`);
+  const values=raw.map(point=>({...point,value:item.transform?item.transform(point.value):point.value}));
   const derived=item.rateSeries?deriveRateSeries(item,values):values;
   if(derived.length<2) throw new Error(`${item.name} 변환 후 관측값 부족`);
   return derived;
@@ -311,6 +322,7 @@ function renderItem(item,values) {
 }
 
 async function refreshAll() {
+  fredBatchPromise=null;
   const button=$('refresh'); button.disabled=true;
   $('status').textContent='지표 데이터 불러오는 중…'; $('updated').textContent='업데이트 중';
   let success=0,fail=0,cursor=0;
