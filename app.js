@@ -196,39 +196,55 @@ function makeCharts() {
   });
 }
 
-let fredBatchPromise = null;
+let fredBatchPromises = new Map();
 const fredSeries = [...new Set(all.filter(item=>item.source==='fred').map(item=>item.ticker))];
+// Keep in sync with the Worker. DFEDTARU/L are daily 7-day series, not the
+// same native frequency as ordinary business-day daily series in FRED.
+const fredFrequency = {
+  DFEDTARU:'daily7', DFEDTARL:'daily7',
+  T5YIE:'daily', T10YIE:'daily', T5YIFR:'daily', DCOILWTICO:'daily', DCOILBRENTEU:'daily',
+  ICSA:'weekly', CCSA:'weekly',
+  EXPINF1YR:'monthly', CPIAUCNS:'monthly', CPILFENS:'monthly', PPIFIS:'monthly', PPIFES:'monthly',
+  UNRATE:'monthly', PAYEMS:'monthly', CES0500000003:'monthly', JTSJOL:'monthly', CIVPART:'monthly',
+  INDPRO:'monthly', TCU:'monthly', RSAFS:'monthly', MARTSMPCSM44X72USS:'monthly', PI:'monthly', UMCSENT:'monthly',
+  DPCERV1Q225SBEA:'quarterly', DPCCRV1Q225SBEA:'quarterly', GDP:'quarterly', A191RL1Q225SBEA:'quarterly'
+};
 
-async function loadFredBatch(){
-  if(fredBatchPromise) return fredBatchPromise;
-  fredBatchPromise=(async()=>{
-    const endpoint=`${PROXY_BASE}/fred.csv?series=${encodeURIComponent(fredSeries.join(','))}&start=2015-01-01`;
+async function loadFredBatch(frequency){
+  if(fredBatchPromises.has(frequency)) return fredBatchPromises.get(frequency);
+  const groupSeries=fredSeries.filter(id=>fredFrequency[id]===frequency);
+  if(!groupSeries.length) throw new Error(`FRED 주기 설정 누락: ${frequency}`);
+  const promise=(async()=>{
+    const endpoint=`${PROXY_BASE}/fred.csv?series=${encodeURIComponent(groupSeries.join(','))}&start=2015-01-01`;
     const response=await fetch(endpoint,{cache:'no-store',headers:{'Accept':'text/csv,text/plain,*/*'}});
     const csv=(await response.text()).replace(/^\uFEFF/,'').trim();
     if(!response.ok) throw new Error(`FRED 데이터 연결 HTTP ${response.status}: ${csv.slice(0,260).replace(/\s+/g,' ')}`);
     const lines=csv.split(/\r?\n/);
     const headers=(lines.shift()||'').split(',').map(x=>x.trim());
-    if(headers[0]!=='observation_date'||!fredSeries.every(id=>headers.includes(id))) throw new Error(`FRED CSV 형식 또는 시리즈 누락: ${headers.join(',').slice(0,220)}`);
-    const indexes=Object.fromEntries(fredSeries.map(id=>[id,headers.indexOf(id)]));
-    const result=new Map(fredSeries.map(id=>[id,[]]));
+    if(headers[0]!=='observation_date'||!groupSeries.every(id=>headers.includes(id))) throw new Error(`FRED CSV 형식 또는 시리즈 누락(${frequency}): ${headers.join(',').slice(0,220)}`);
+    const indexes=Object.fromEntries(groupSeries.map(id=>[id,headers.indexOf(id)]));
+    const result=new Map(groupSeries.map(id=>[id,[]]));
     for(const line of lines){
       const parts=line.split(','); const date=(parts[0]||'').trim();
       if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
       const time=Math.floor(Date.parse(`${date}T00:00:00Z`)/1000);
-      for(const id of fredSeries){
+      for(const id of groupSeries){
         const raw=(parts[indexes[id]]||'').trim(); const value=raw==='.'||raw===''?NaN:Number(raw);
         if(Number.isFinite(value)) result.get(id).push({time,value,date});
       }
     }
     return result;
-  })().catch(error=>{fredBatchPromise=null;throw error;});
-  return fredBatchPromise;
+  })().catch(error=>{fredBatchPromises.delete(frequency);throw error;});
+  fredBatchPromises.set(frequency,promise);
+  return promise;
 }
 
 async function fetchFred(item) {
-  const batch=await loadFredBatch();
+  const frequency=fredFrequency[item.ticker];
+  if(!frequency) throw new Error(`${item.name}: FRED 주기 설정 누락`);
+  const batch=await loadFredBatch(frequency);
   const raw=batch.get(item.ticker)||[];
-  if(raw.length<2) throw new Error(`${item.name}: FRED 관측값 부족`);
+  if(raw.length<2) throw new Error(`${item.name}: FRED 관측값 부족 (${item.ticker}, ${raw.length}개)`);
   const values=raw.map(point=>({...point,value:item.transform?item.transform(point.value):point.value}));
   const derived=item.rateSeries?deriveRateSeries(item,values):values;
   if(derived.length<2) throw new Error(`${item.name} 변환 후 관측값 부족`);
@@ -322,7 +338,7 @@ function renderItem(item,values) {
 }
 
 async function refreshAll() {
-  fredBatchPromise=null;
+  fredBatchPromises.clear();
   const button=$('refresh'); button.disabled=true;
   $('status').textContent='지표 데이터 불러오는 중…'; $('updated').textContent='업데이트 중';
   let success=0,fail=0,cursor=0;
